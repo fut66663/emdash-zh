@@ -58,10 +58,23 @@ echo [OK] Emdash found: !EMDASH_RESOURCES!
 
 :: ── 2. Extract app.asar ───────────────────────────────────────
 set "PROJECT_DIR=%~dp0"
+set "NEED_EXTRACT=0"
 
-if exist "!EMDASH_RESOURCES!\app\out\renderer\index.html" (
-    echo [OK] app/ directory already exists, skipping extraction
-) else (
+if not exist "!EMDASH_RESOURCES!\app\out\renderer\index.html" (
+    set "NEED_EXTRACT=1"
+)
+
+:: If app.asar reappeared, Emdash was updated — force re-extract
+if exist "!EMDASH_RESOURCES!\app.asar" (
+    echo [..] Detected new Emdash version, re-extracting...
+    set "NEED_EXTRACT=1"
+    :: Clean old extracted directory
+    if exist "!EMDASH_RESOURCES!\app" (
+        rmdir /s /q "!EMDASH_RESOURCES!\app" >nul 2>&1
+    )
+)
+
+if "!NEED_EXTRACT!"=="1" (
     echo [..] Extracting app.asar (this takes ~10 seconds)...
     node "!PROJECT_DIR!tools\extract-asar.mjs" "!EMDASH_RESOURCES!"
     if !errorlevel! neq 0 (
@@ -71,6 +84,9 @@ if exist "!EMDASH_RESOURCES!\app\out\renderer\index.html" (
         pause
         exit /b 1
     )
+    echo [OK] Extraction complete
+) else (
+    echo [OK] app/ directory up to date
 )
 
 :: ── 3. Rename app.asar so Electron uses app/ directory ────────
