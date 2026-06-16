@@ -35,10 +35,33 @@ if (existsSync(join(outDir, 'out', 'renderer', 'index.html'))) {
 }
 
 const buf = readFileSync(asarPath);
-const totalHeaderSize = buf.readUInt32LE(buf.length - 4);
-const headerSize = totalHeaderSize - 4;
-const headerStr = buf.slice(buf.length - totalHeaderSize, buf.length - 4).toString('utf8');
-const header = JSON.parse(headerStr);
+
+let header;
+let contentOffset;
+
+// Detect ASAR format:
+// New format (Emdash 2026+): header at beginning with 4 uint32 preamble
+//   [4B:4] [4B:total] [4B:block_sz] [4B:json_len] [json] [files...]
+// Old format (standard Electron): header at end, 4B size at tail
+//   [files...] [json] [4B:total_size_incl_4]
+
+if (buf.length >= 20 && buf.readUInt32LE(0) === 4 && buf.slice(16, 24).toString('utf8') === '{"files"') {
+  // New format: 4 uint32 preamble, JSON at byte 16
+  //   [4B:4] [4B:?] [4B:end_to_content] [4B:json_len] [json...] [files...]
+  const jsonLen = buf.readUInt32LE(12);
+  const headerStr = buf.slice(16, 16 + jsonLen).toString('utf8').replace(/\0+$/, '');
+  header = JSON.parse(headerStr);
+  contentOffset = 12 + buf.readUInt32LE(8);
+  console.log(`Detected new ASAR format: json ${jsonLen} bytes, content at ${contentOffset}`);
+} else {
+  // Old format
+  const totalHeaderSize = buf.readUInt32LE(buf.length - 4);
+  const headerSize = totalHeaderSize - 4;
+  const headerStr = buf.slice(buf.length - totalHeaderSize, buf.length - 4).toString('utf8');
+  header = JSON.parse(headerStr);
+  contentOffset = 0;
+  console.log(`Detected old ASAR format: header ${headerSize} bytes at end`);
+}
 
 let skipped = 0;
 let extracted = 0;
@@ -61,7 +84,7 @@ function extractFiles(files, basePath, currentOut) {
           skipped++;
         }
       } else {
-        const start = parseInt(info.offset || 0);
+        const start = contentOffset + parseInt(info.offset || 0);
         const size = parseInt(info.size);
         const content = buf.slice(start, start + size);
         writeFileSync(outPath, content);
@@ -72,5 +95,11 @@ function extractFiles(files, basePath, currentOut) {
 }
 
 console.log('Extracting app.asar...');
-extractFiles(header.files, '', outDir);
-console.log(`Done: ${extracted} files extracted, ${skipped} skipped (missing unpacked).`);
+try {
+  extractFiles(header.files, '', outDir);
+  console.log(`Done: ${extracted} files extracted, ${skipped} skipped (missing unpacked).`);
+} catch (err) {
+  console.error('Extraction failed:', err.message);
+  console.error(err.stack);
+  process.exit(1);
+}
