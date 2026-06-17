@@ -122,3 +122,77 @@ for (const zh of checks) {
     console.log('  ✗', zh, 'MISSING!');
   }
 }
+
+// ── Inject emdash-zh IPC log handler ──────────────────────────
+const LOG_DIR = 'E:/emdash-zh/logs';
+const LOG_INJECT = `
+// === emdash-zh: IPC log handler (injected by patch-main-menu.mjs) ===
+(function () {
+  var LOG_DIR = ${JSON.stringify(LOG_DIR)};
+  var LOG_RETENTION_DAYS = 3;
+  var lastCleanupDate = '';
+  // fs, path, ipcMain are already imported at the top of this ESM module
+  try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch (_) {}
+
+  function cleanupOldLogs() {
+    var today = new Date().toISOString().slice(0, 10);
+    if (lastCleanupDate === today) return;
+    lastCleanupDate = today;
+    try {
+      var files = fs.readdirSync(LOG_DIR);
+      var cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - LOG_RETENTION_DAYS);
+      for (var i = 0; i < files.length; i++) {
+        var match = files[i].match(/^emdash-zh-(\\d{4}-\\d{2}-\\d{2})\\.log$/);
+        if (match) {
+          var fileDate = new Date(match[1]);
+          if (fileDate < cutoff) {
+            fs.unlinkSync(path.join(LOG_DIR, files[i]));
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  ipcMain.handle('emdash-zh:clear-log', function () {
+    try {
+      var date = new Date().toISOString().slice(0, 10);
+      var logPath = path.join(LOG_DIR, 'emdash-zh-' + date + '.log');
+      if (fs.existsSync(logPath)) fs.writeFileSync(logPath, '', 'utf-8');
+    } catch (_) {}
+  });
+
+  ipcMain.handle('emdash-zh:save-untranslated', function (_event, entries) {
+    try {
+      var date = new Date().toISOString().slice(0, 10);
+      var filePath = path.join(LOG_DIR, 'untranslated-' + date + '.txt');
+      var lines = [];
+      for (var i = 0; i < entries.length; i++) {
+        lines.push(entries[i].count + '\\t' + entries[i].text);
+      }
+      fs.writeFileSync(filePath, lines.join('\\n'), 'utf-8');
+    } catch (_) {}
+  });
+
+  ipcMain.handle('emdash-zh:log', function (_event, entry) {
+    try {
+      var date = new Date().toISOString().slice(0, 10);
+      var logPath = path.join(LOG_DIR, 'emdash-zh-' + date + '.log');
+      var line = '[' + entry.level.toUpperCase() + '] +' + String(entry.t) + 'ms ' + entry.msg;
+      if (entry.data !== undefined) line += ' ' + JSON.stringify(entry.data);
+      fs.appendFileSync(logPath, line + '\\n', 'utf-8');
+      cleanupOldLogs();
+    } catch (_) {}
+  });
+})();
+`;
+
+// Check if already injected
+if (!content.includes('emdash-zh:log')) {
+  content += LOG_INJECT;
+  console.log('  ✓ IPC log handler injected');
+  // Write the updated content
+  writeFileSync(MAIN_PATH, content, 'utf-8');
+} else {
+  console.log('  ✓ IPC log handler already present');
+}

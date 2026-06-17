@@ -116,20 +116,21 @@ regexLiteral += '  ]';
 // Replace the dictionary section in the engine
 // Find and replace between the DICT markers
 const startMarker = "var DICT = {";
-const endMarker = "  // ============================================================\n  // 2. SKIP LOGIC";
+const endMarker = /\/\/ ==+\s*\n\s*\/\/ 2\. SKIP LOGIC/;
 
 const startIdx = engine.indexOf(startMarker);
-const endIdx = engine.indexOf(endMarker);
+const endMatch = engine.match(endMarker);
+const endIdx = endMatch ? endMatch.index : -1;
 
 if (startIdx === -1 || endIdx === -1) {
   console.error('ERROR: Could not find DICT section in engine source.');
   process.exit(1);
 }
 
-const replacement = 'var DICT = {\n    exact: ' + exactLiteral + ',\n    regex: ' + regexLiteral + '\n  };\n\n' + endMarker;
+const replacement = 'var DICT = {\n    exact: ' + exactLiteral + ',\n    regex: ' + regexLiteral + '\n  };\n\n' + endMatch[0];
 
 const before = engine.substring(0, startIdx);
-const after = engine.substring(endIdx + endMarker.length);
+const after = engine.substring(endIdx + endMatch[0].length);
 engine = before + replacement + after;
 
 // Simple minification

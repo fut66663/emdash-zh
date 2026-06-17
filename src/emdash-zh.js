@@ -10,6 +10,30 @@
 (function () {
   'use strict';
 
+  var STATE = {
+    version: '1.2.1',
+    totalTranslations: 0,
+    totalMutations: 0,
+    totalScans: 0,
+    slowOps: 0,
+    errors: 0,
+    startTime: Date.now(),
+    lastScanMs: 0,
+    peakScanMs: 0,
+    untranslated: {}
+  };
+  window.__EMDASH_ZH__ = STATE;
+
+  function log(level, msg, data) {
+    try {
+      if (window.electronAPI && window.electronAPI.invoke) {
+        window.electronAPI.invoke('emdash-zh:log', { t: Date.now() - STATE.startTime, level: level, msg: msg, data: data });
+      }
+    } catch (_) {}
+  }
+
+  log('info', 'v' + STATE.version + ' started');
+
   // ============================================================
   // 1. TRANSLATION DICTIONARY (built-time inline)
   // ============================================================
@@ -364,13 +388,16 @@
     ]
   };
 
-  // Build lowercase lookup map for case-insensitive matching (fast path)
+  // Build lowercase lookup map
   var exactLower = {};
   for (var k in DICT.exact) {
     if (DICT.exact.hasOwnProperty(k)) {
       exactLower[k.toLowerCase()] = DICT.exact[k];
     }
   }
+
+  // Regex result cache: string → translated string
+  var regexCache = {};
 
   // ============================================================
   // 2. SKIP LOGIC
@@ -379,24 +406,21 @@
   var BLACKLIST_TAGS = new Set([
     'SCRIPT', 'STYLE', 'NOSCRIPT', 'INPUT', 'TEXTAREA',
     'CODE', 'PRE', 'KBD', 'SAMP', 'VAR',
-    'CANVAS', 'SVG', 'IFRAME', 'WEBVIEW',
-    'SELECT', 'OPTION', 'BUTTON'
+    'CANVAS', 'SVG', 'IFRAME', 'WEBVIEW'
   ]);
-
-  // Single most important selector: .xterm covers ALL xterm.js terminal content
-  var SKIP_SELECTORS = '.xterm, [contenteditable="true"], [contenteditable="plaintext-only"], [data-no-translate]';
 
   function shouldSkip(node) {
     var el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
-    if (!el) return true;
-    if (el.nodeType !== Node.ELEMENT_NODE) return true;
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return true;
 
-    if (BLACKLIST_TAGS.has(el.tagName)) return true;
-
-    try {
-      if (el.closest(SKIP_SELECTORS)) return true;
-    } catch (_) { return true; }
-
+    // Walk up ancestors; stop at body
+    while (el && el !== document.body) {
+      if (BLACKLIST_TAGS.has(el.tagName)) return true;
+      if (el.getAttribute('contenteditable') === 'true') return true;
+      if (el.hasAttribute('data-no-translate')) return true;
+      if (el.classList && el.classList.contains('xterm')) return true;
+      el = el.parentElement;
+    }
     return false;
   }
 
@@ -405,11 +429,10 @@
     if (!trimmed) return true;
     if (trimmed.length > 200) return true;
 
-    // Pure punctuation, numbers, symbols only
     if (/^[\s\d.,;:!?@#$%^&*()\-+=<>\/\\|~`'"\[\]{}_]+$/.test(trimmed))
       return true;
 
-    // Already >30% Chinese characters — assume translated
+    // Already >30% CJK — assume translated
     var cnCount = (trimmed.match(/[一-鿿]/g) || []).length;
     if (cnCount / trimmed.length > 0.3) return true;
 
@@ -425,29 +448,46 @@
     var trimmed = original.trim();
     if (!trimmed) return;
 
-    // Step 1: Exact match (fast path, covers ~80% of strings)
+    // Step 1: Exact match
     if (DICT.exact.hasOwnProperty(trimmed)) {
       textNode.textContent = original.replace(trimmed, DICT.exact[trimmed]);
+      STATE.totalTranslations++;
       return;
     }
 
-    // Step 2: Case-insensitive match (fast path using lowercase map)
+    // Step 2: Case-insensitive match
     var entry = exactLower[trimmed.toLowerCase()];
     if (entry) {
       textNode.textContent = original.replace(trimmed, entry);
+      STATE.totalTranslations++;
       return;
     }
 
-    // Step 3: Regex patterns (for dynamic text)
+    // Step 3: Cache lookup
+    var cached = regexCache[trimmed];
+    if (cached !== undefined) {
+      if (cached !== null) {
+        textNode.textContent = original.replace(trimmed, cached);
+        STATE.totalTranslations++;
+      }
+      return;
+    }
+
+    // Step 4: Regex patterns
     for (var i = 0; i < DICT.regex.length; i++) {
-      var entry = DICT.regex[i];
-      if (entry.pattern.test(trimmed)) {
-        textNode.textContent = original.replace(entry.pattern, entry.replace);
+      var re = DICT.regex[i];
+      if (re.pattern.test(trimmed)) {
+        var result = original.replace(re.pattern, re.replace);
+        textNode.textContent = result;
+        regexCache[trimmed] = re.replace;
+        STATE.totalTranslations++;
         return;
       }
     }
 
-    // No match — leave as English (graceful degradation)
+    // No match — cache as null to avoid retesting
+    regexCache[trimmed] = null;
+    STATE.untranslated[trimmed] = (STATE.untranslated[trimmed] || 0) + 1;
   }
 
   // ============================================================
@@ -455,16 +495,16 @@
   // ============================================================
 
   var taskQueue = [];
-  var rafScheduled = false;
+  var timerScheduled = false;
 
   function scheduleFlush() {
-    if (rafScheduled) return;
-    rafScheduled = true;
-    requestAnimationFrame(flush);
+    if (timerScheduled) return;
+    timerScheduled = true;
+    setTimeout(flush, 50);
   }
 
   function flush() {
-    rafScheduled = false;
+    timerScheduled = false;
     if (taskQueue.length === 0) return;
 
     var nodes = taskQueue;
@@ -476,6 +516,7 @@
   }
 
   function walkAndTranslate(root) {
+    var started = performance.now();
     try {
       var walker = document.createTreeWalker(
         root,
@@ -495,24 +536,27 @@
           translateTextNode(textNode);
         } catch (_) {}
       }
-    } catch (_) {}
+    } catch (_) {
+      STATE.errors++;
+    }
+
+    var elapsed = performance.now() - started;
+    if (elapsed > 10) {
+      STATE.slowOps++;
+      log('warn', 'SLOW walkAndTranslate: ' + elapsed.toFixed(1) + 'ms');
+    }
+    STATE.lastScanMs = elapsed;
+    if (elapsed > STATE.peakScanMs) STATE.peakScanMs = elapsed;
   }
 
   function addTask(node) {
-    if (node.nodeType === Node.TEXT_NODE) {
-      if (!shouldSkip(node) && !shouldSkipText(node.textContent)) {
-        taskQueue.push(node);
-        scheduleFlush();
-      }
-    } else if (node.nodeType === Node.ELEMENT_NODE) {
-      taskQueue.push(node);
-      scheduleFlush();
-    }
+    taskQueue.push(node);
+    scheduleFlush();
   }
 
-  // Also translate element attributes
+  // Translate element attributes
   function translateAttributes(el) {
-    var attrs = ['title', 'aria-label', 'placeholder', 'alt', 'label'];
+    var attrs = ['title', 'aria-label', 'placeholder', 'alt'];
     for (var i = 0; i < attrs.length; i++) {
       try {
         var val = el.getAttribute(attrs[i]);
@@ -520,28 +564,32 @@
         var trimmed = val.trim();
         if (shouldSkipText(trimmed)) continue;
 
-        // Exact match
         if (DICT.exact.hasOwnProperty(trimmed)) {
           el.setAttribute(attrs[i], DICT.exact[trimmed]);
           continue;
         }
 
-        // Case-insensitive match
         var lower = trimmed.toLowerCase();
         if (exactLower[lower]) {
           el.setAttribute(attrs[i], exactLower[lower]);
           continue;
         }
 
-        // Regex match
+        var cached = regexCache[trimmed];
+        if (cached !== undefined) {
+          if (cached !== null) el.setAttribute(attrs[i], cached);
+          continue;
+        }
+
         for (var j = 0; j < DICT.regex.length; j++) {
           if (DICT.regex[j].pattern.test(trimmed)) {
-            el.setAttribute(attrs[i], trimmed.replace(
-              DICT.regex[j].pattern, DICT.regex[j].replace
-            ));
+            var result = trimmed.replace(DICT.regex[j].pattern, DICT.regex[j].replace);
+            el.setAttribute(attrs[i], result);
+            regexCache[trimmed] = result;
             break;
           }
         }
+        if (regexCache[trimmed] === undefined) regexCache[trimmed] = null;
       } catch (_) {}
     }
   }
@@ -552,20 +600,19 @@
 
   function setupObserver() {
     var observer = new MutationObserver(function (mutations) {
+      STATE.totalMutations += mutations.length;
+
       for (var i = 0; i < mutations.length; i++) {
         var m = mutations[i];
 
         if (m.type === 'childList') {
           for (var j = 0; j < m.addedNodes.length; j++) {
             var node = m.addedNodes[j];
-            // Also check parent for attribute translations
             if (node.nodeType === Node.ELEMENT_NODE) {
               translateAttributes(node);
             }
             addTask(node);
           }
-        } else if (m.type === 'characterData') {
-          addTask(m.target);
         } else if (m.type === 'attributes') {
           if (m.target.nodeType === Node.ELEMENT_NODE) {
             translateAttributes(m.target);
@@ -577,12 +624,9 @@
     observer.observe(document.documentElement, {
       childList: true,
       subtree: true,
-      characterData: true,
       attributes: true,
       attributeFilter: ['title', 'aria-label', 'placeholder', 'alt']
     });
-
-    return observer;
   }
 
   // ============================================================
@@ -591,34 +635,72 @@
 
   function fullScan() {
     if (!document.body) return;
+    STATE.totalScans++;
+    var started = performance.now();
+
     walkAndTranslate(document.body);
 
-    // Also translate attributes on all current elements
     try {
       var all = document.querySelectorAll('[title], [aria-label], [placeholder], [alt]');
       for (var i = 0; i < all.length; i++) {
         translateAttributes(all[i]);
       }
     } catch (_) {}
+
+    var elapsed = performance.now() - started;
+    log('info', 'scan #' + STATE.totalScans + ': ' + elapsed.toFixed(1) + 'ms, TL=' + STATE.totalTranslations + ', MUT=' + STATE.totalMutations);
+  }
+
+  function dumpUntranslated() {
+    var entries = [];
+    for (var k in STATE.untranslated) {
+      if (STATE.untranslated.hasOwnProperty(k)) {
+        entries.push({ text: k, count: STATE.untranslated[k] });
+      }
+    }
+    entries.sort(function (a, b) { return b.count - a.count; });
+    try {
+      if (window.electronAPI && window.electronAPI.invoke) {
+        window.electronAPI.invoke('emdash-zh:save-untranslated', entries);
+      }
+    } catch (_) {}
+    log('info', 'untranslated dump: ' + entries.length + ' unique strings');
   }
 
   function init() {
-    // Set up observer immediately
-    setupObserver();
+    try {
+      // Clear old session log
+      try {
+        if (window.electronAPI && window.electronAPI.invoke) {
+          window.electronAPI.invoke('emdash-zh:clear-log');
+        }
+      } catch (_) {}
 
-    // Phase 1: First full scan at 500ms (wait for React hydration)
-    setTimeout(fullScan, 500);
+      setupObserver();
 
-    // Phase 2: Incremental scans every 3s for 30s (catch lazy-loaded UI)
-    var scanCount = 0;
-    var timer = setInterval(function () {
-      scanCount++;
-      fullScan();
-      if (scanCount >= 10) clearInterval(timer);
-    }, 3000);
+      setTimeout(function () { try { fullScan(); } catch (e) { log('error', 'scan #1 failed: ' + e.message); } }, 500);
+
+      var scanCount = 0;
+      var timer = setInterval(function () {
+        scanCount++;
+        try { fullScan(); } catch (e) { log('error', 'scan failed: ' + e.message); }
+        if (scanCount >= 10) {
+          clearInterval(timer);
+          setTimeout(dumpUntranslated, 5000);
+        }
+      }, 3000);
+    } catch (e) {
+      log('error', 'init failed: ' + e.message);
+    }
   }
 
-  // Start when DOM is ready
+  window.addEventListener('error', function (e) {
+    if (e.filename && e.filename.indexOf('emdash-zh') > -1) {
+      STATE.errors++;
+      log('error', 'uncaught: ' + e.message + ' @ ' + e.lineno);
+    }
+  });
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
   } else {
