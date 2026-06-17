@@ -463,7 +463,7 @@
       return;
     }
 
-    // Step 3: Cache lookup
+    // Step 3: Cache lookup (trimmed → translated)
     var cached = regexCache[trimmed];
     if (cached !== undefined) {
       if (cached !== null) {
@@ -477,9 +477,9 @@
     for (var i = 0; i < DICT.regex.length; i++) {
       var re = DICT.regex[i];
       if (re.pattern.test(trimmed)) {
-        var result = original.replace(re.pattern, re.replace);
-        textNode.textContent = result;
-        regexCache[trimmed] = re.replace;
+        var translated = trimmed.replace(re.pattern, re.replace);
+        textNode.textContent = original.replace(trimmed, translated);
+        regexCache[trimmed] = translated;
         STATE.totalTranslations++;
         return;
       }
@@ -495,23 +495,42 @@
   // ============================================================
 
   var taskQueue = [];
+  var attrQueue = [];
+  var queuedNodes = new WeakSet();
   var timerScheduled = false;
+
+  var idleCallback = window.requestIdleCallback || function (cb, opts) {
+    return setTimeout(cb, (opts && opts.timeout) || 50);
+  };
+  var cancelIdle = window.cancelIdleCallback || clearTimeout;
 
   function scheduleFlush() {
     if (timerScheduled) return;
     timerScheduled = true;
-    setTimeout(flush, 50);
+    timerScheduled = idleCallback(flush, { timeout: 100 });
   }
 
   function flush() {
     timerScheduled = false;
-    if (taskQueue.length === 0) return;
 
-    var nodes = taskQueue;
-    taskQueue = [];
+    // Phase 1: Attribute translation
+    if (attrQueue.length > 0) {
+      var attrs = attrQueue;
+      attrQueue = [];
+      for (var i = 0; i < attrs.length; i++) {
+        try { translateAttributes(attrs[i]); } catch (_) {}
+        queuedNodes.delete(attrs[i]);
+      }
+    }
 
-    for (var i = 0; i < nodes.length; i++) {
-      walkAndTranslate(nodes[i]);
+    // Phase 2: Text translation
+    if (taskQueue.length > 0) {
+      var nodes = taskQueue;
+      taskQueue = [];
+      for (var i = 0; i < nodes.length; i++) {
+        walkAndTranslate(nodes[i]);
+        queuedNodes.delete(nodes[i]);
+      }
     }
   }
 
@@ -547,11 +566,6 @@
     }
     STATE.lastScanMs = elapsed;
     if (elapsed > STATE.peakScanMs) STATE.peakScanMs = elapsed;
-  }
-
-  function addTask(node) {
-    taskQueue.push(node);
-    scheduleFlush();
   }
 
   // Translate element attributes
@@ -608,14 +622,19 @@
         if (m.type === 'childList') {
           for (var j = 0; j < m.addedNodes.length; j++) {
             var node = m.addedNodes[j];
+            if (queuedNodes.has(node)) continue;
+            queuedNodes.add(node);
             if (node.nodeType === Node.ELEMENT_NODE) {
-              translateAttributes(node);
+              attrQueue.push(node);
             }
-            addTask(node);
+            taskQueue.push(node);
           }
+          if (taskQueue.length > 0) scheduleFlush();
         } else if (m.type === 'attributes') {
-          if (m.target.nodeType === Node.ELEMENT_NODE) {
-            translateAttributes(m.target);
+          if (m.target.nodeType === Node.ELEMENT_NODE && !queuedNodes.has(m.target)) {
+            queuedNodes.add(m.target);
+            attrQueue.push(m.target);
+            scheduleFlush();
           }
         }
       }
@@ -678,17 +697,17 @@
 
       setupObserver();
 
-      setTimeout(function () { try { fullScan(); } catch (e) { log('error', 'scan #1 failed: ' + e.message); } }, 500);
-
-      var scanCount = 0;
-      var timer = setInterval(function () {
-        scanCount++;
-        try { fullScan(); } catch (e) { log('error', 'scan failed: ' + e.message); }
-        if (scanCount >= 10) {
-          clearInterval(timer);
-          setTimeout(dumpUntranslated, 5000);
-        }
-      }, 3000);
+      var delays = [500, 2000, 5000, 12000];
+      for (var d = 0; d < delays.length; d++) {
+        (function (delay) {
+          setTimeout(function () {
+            try { fullScan(); } catch (e) { log('error', 'scan failed: ' + e.message); }
+            if (delay === delays[delays.length - 1]) {
+              setTimeout(dumpUntranslated, 3000);
+            }
+          }, delay);
+        })(delays[d]);
+      }
     } catch (e) {
       log('error', 'init failed: ' + e.message);
     }
