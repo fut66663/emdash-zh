@@ -5,7 +5,7 @@ setlocal enabledelayedexpansion
 echo.
 echo   ╔══════════════════════════════════════════╗
 echo   ║     Emdash Chinese Localization          ║
-echo   ║     emdash-zh v1.1.0 (MIT)               ║
+echo   ║     emdash-zh v1.2.1 (MIT)               ║
 echo   ╚══════════════════════════════════════════╝
 echo.
 
